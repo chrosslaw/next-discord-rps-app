@@ -1,95 +1,178 @@
-import Image from 'next/image'
-import styles from './page.module.css'
+import "dotenv/config";
+import express from "express";
+import {
+  InteractionType,
+  InteractionResponseType,
+  InteractionResponseFlags,
+  MessageComponentTypes,
+  ButtonStyleTypes,
+} from "discord-interactions";
+import {
+  VerifyDiscordRequest,
+  getRandomEmoji,
+  DiscordRequest,
+} from "./rps/utils.js";
+import { getShuffledOptions, getResult } from "./rps/game.js";
 
-export default function Home() {
-  return (
-    <main className={styles.main}>
-      <div className={styles.description}>
-        <p>
-          Get started by editing&nbsp;
-          <code className={styles.code}>app/page.js</code>
-        </p>
-        <div>
-          <a
-            href="https://vercel.com?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            By{' '}
-            <Image
-              src="/vercel.svg"
-              alt="Vercel Logo"
-              className={styles.vercelLogo}
-              width={100}
-              height={24}
-              priority
-            />
-          </a>
-        </div>
-      </div>
+// Create an express app
+const app = express();
+// Get port, or default to 3000
+const PORT = process.env.PORT || 3000;
+// Parse request body and verifies incoming requests using discord-interactions package
+app.use(express.json({ verify: VerifyDiscordRequest(process.env.PUBLIC_KEY) }));
 
-      <div className={styles.center}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js Logo"
-          width={180}
-          height={37}
-          priority
-        />
-      </div>
+// Store for in-progress games. In production, you'd want to use a DB
+const activeGames = {};
 
-      <div className={styles.grid}>
-        <a
-          href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Docs <span>-&gt;</span>
-          </h2>
-          <p>Find in-depth information about Next.js features and API.</p>
-        </a>
+/**
+ * Interactions endpoint URL where Discord will send HTTP requests
+ */
+app.post("/interactions", async function (req, res) {
+  // Interaction type and data
+  const { type, id, data } = req.body;
 
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Learn <span>-&gt;</span>
-          </h2>
-          <p>Learn about Next.js in an interactive course with&nbsp;quizzes!</p>
-        </a>
+  /**
+   * Handle verification requests
+   */
+  if (type === InteractionType.PING) {
+    return res.send({ type: InteractionResponseType.PONG });
+  }
 
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Templates <span>-&gt;</span>
-          </h2>
-          <p>Explore starter templates for Next.js.</p>
-        </a>
+  /**
+   * Handle slash command requests
+   * See https://discord.com/developers/docs/interactions/application-commands#slash-commands
+   */
+  if (type === InteractionType.APPLICATION_COMMAND) {
+    const { name } = data;
 
-        <a
-          href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Deploy <span>-&gt;</span>
-          </h2>
-          <p>
-            Instantly deploy your Next.js site to a shareable URL with Vercel.
-          </p>
-        </a>
-      </div>
-    </main>
-  )
-}
+    // "test" command
+    if (name === "test") {
+      // Send a message into the channel where command was triggered from
+      return res.send({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          // Fetches a random emoji to send from a helper function
+          content: "hello world " + getRandomEmoji(),
+        },
+      });
+    }
+    // "challenge" command
+    if (name === "challenge" && id) {
+      const userId = req.body.member.user.id;
+      // User's object choice
+      const objectName = req.body.data.options[0].value;
+
+      // Create active game using message ID as the game ID
+      activeGames[id] = {
+        id: userId,
+        objectName,
+      };
+
+      return res.send({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: {
+          // Fetches a random emoji to send from a helper function
+          content: `Rock paper scissors challenge from <@${userId}>`,
+          components: [
+            {
+              type: MessageComponentTypes.ACTION_ROW,
+              components: [
+                {
+                  type: MessageComponentTypes.BUTTON,
+                  // Append the game ID to use later on
+                  custom_id: `accept_button_${req.body.id}`,
+                  label: "Accept",
+                  style: ButtonStyleTypes.PRIMARY,
+                },
+              ],
+            },
+          ],
+        },
+      });
+    }
+  }
+
+  /**
+   * Handle requests from interactive components
+   * See https://discord.com/developers/docs/interactions/message-components#responding-to-a-component-interaction
+   */
+  if (type === InteractionType.MESSAGE_COMPONENT) {
+    // custom_id set in payload when sending message component
+    const componentId = data.custom_id;
+
+    if (componentId.startsWith("accept_button_")) {
+      // get the associated game ID
+      const gameId = componentId.replace("accept_button_", "");
+      // Delete message with token in request body
+      const endpoint = `webhooks/${process.env.APP_ID}/${req.body.token}/messages/${req.body.message.id}`;
+      try {
+        await res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: "What is your object of choice?",
+            // Indicates it'll be an ephemeral message
+            flags: InteractionResponseFlags.EPHEMERAL,
+            components: [
+              {
+                type: MessageComponentTypes.ACTION_ROW,
+                components: [
+                  {
+                    type: MessageComponentTypes.STRING_SELECT,
+                    // Append game ID
+                    custom_id: `select_choice_${gameId}`,
+                    options: getShuffledOptions(),
+                  },
+                ],
+              },
+            ],
+          },
+        });
+        // Delete previous message
+        await DiscordRequest(endpoint, { method: "DELETE" });
+      } catch (err) {
+        console.error("Error sending message:", err);
+      }
+    } else if (componentId.startsWith("select_choice_")) {
+      // get the associated game ID
+      const gameId = componentId.replace("select_choice_", "");
+
+      if (activeGames[gameId]) {
+        // Get user ID and object choice for responding user
+        const userId = req.body.member.user.id;
+        const objectName = data.values[0];
+        // Calculate result from helper function
+        const resultStr = getResult(activeGames[gameId], {
+          id: userId,
+          objectName,
+        });
+
+        // Remove game from storage
+        delete activeGames[gameId];
+        // Update message with token in request body
+        const endpoint = `webhooks/${process.env.APP_ID}/${req.body.token}/messages/${req.body.message.id}`;
+
+        try {
+          // Send results
+          await res.send({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: { content: resultStr },
+          });
+          // Update ephemeral message
+          await DiscordRequest(endpoint, {
+            method: "PATCH",
+            body: {
+              content: "Nice choice " + getRandomEmoji(),
+              components: [],
+            },
+          });
+        } catch (err) {
+          console.error("Error sending message:", err);
+        }
+      }
+    }
+  }
+});
+
+app.listen(PORT, () => {
+  console.log("Listening on port", PORT);
+});
