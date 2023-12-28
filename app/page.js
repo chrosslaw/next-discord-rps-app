@@ -11,8 +11,8 @@ import {
   VerifyDiscordRequest,
   getRandomEmoji,
   DiscordRequest,
-} from "./utils.js";
-import { getShuffledOptions, getResult } from "./game.js";
+} from "./rps/utils.js";
+import { getShuffledOptions, getResult } from "./rps/game.js";
 
 // Create an express app
 const app = express();
